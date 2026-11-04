@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+# Generated outputs. Real eval logs and bundles can contain secrets or
+# private data, so they are never committed by accident.
+demo-logs/
+logs/
+sift-out/
+*.eval
+*.zip
+.env
