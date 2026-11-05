@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from evalsift import __version__
-from evalsift.adapters import load_runs
+from evalsift.adapters import NotAnInspectLog, load_runs
 from evalsift.bundle import BundleOptions, SecretLeakError, build_bundle
 from evalsift.checks import REGISTRY, CheckConfig, invalid_run_ids, run_checks
 from evalsift.export import write_jsonl, write_traces
@@ -152,9 +152,16 @@ def cmd_list_checks(_: argparse.Namespace) -> int:
 
 
 def _load(args: argparse.Namespace) -> tuple[list[Run], list[Finding]]:
-    runs = load_runs(args.logs)
+    skipped: list[NotAnInspectLog] = []
+
+    def report_skip(exc: NotAnInspectLog) -> None:
+        skipped.append(exc)
+        print(f"evalsift: skipped {exc}", file=sys.stderr)
+
+    runs = load_runs(args.logs, on_skip=report_skip)
     if not runs:
-        raise ValueError("no runs found in the given logs")
+        detail = f" ({len(skipped)} file(s) skipped as unreadable)" if skipped else ""
+        raise ValueError(f"no runs found in the given logs{detail}")
     overrides: dict[str, Severity] = {}
     for item in args.severity or []:
         name, _, level = item.partition("=")

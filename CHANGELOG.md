@@ -13,3 +13,6 @@ First release.
   CSVs; JSONL export.
 - Redacted review bundles with source-log hashes, re-scanned before writing.
 - `evalsift scan` for secrets in files you are about to share.
+- Files with a log extension that aren't Inspect logs (a stray `config.json`, a corrupt
+  `.eval`) are skipped with a message when found in a folder, and are a clean error when
+  named directly, instead of crashing with a traceback.

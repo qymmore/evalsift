@@ -1,7 +1,7 @@
 # evalsift
- 
-**Which of your agent runs actually measured the model and what do the valid ones say?**
- 
+
+**Which of my agent runs actually measured the model, and what do the valid ones say?**
+
 Agent evaluations fail in two different ways, and most pipelines blur them. Some runs are
 *invalid*: a tool crashed, the API dropped, no score was written. They tell you nothing about
 the model and should be excluded. Others are *valid but rough*: a malformed tool call, a

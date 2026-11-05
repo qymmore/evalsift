@@ -9,7 +9,7 @@ fields between Inspect releases.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -22,36 +22,90 @@ _NON_LOG_NAMES = {"logs.json", "listing.json"}
 _NON_AGENT_ROLES = {"grader", "scorer"}
 
 
+class NotAnInspectLog(ValueError):
+    """A file could not be read as an Inspect log."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"{path} is not a readable Inspect log ({reason})")
+        self.path = path
+        self.reason = reason
+
+
+SkipHandler = Callable[[NotAnInspectLog], None]
+
+
 def discover(paths: Iterable[str | Path]) -> list[Path]:
     """Expand files and directories into a sorted, de-duplicated list of logs."""
-    found: set[Path] = set()
+    return sorted(_discover_with_origin(paths))
+
+
+def _discover_with_origin(paths: Iterable[str | Path]) -> dict[Path, bool]:
+    """Map each candidate log to whether the user named it explicitly.
+
+    A file named on the command line is the user's claim that it is a log, so
+    failing to read it is an error. A file found by scanning a folder is only
+    a guess based on its extension, so failing to read it means skip it.
+    """
+    found: dict[Path, bool] = {}
     for raw in paths:
         p = Path(raw)
         if p.is_dir():
             for suffix in LOG_SUFFIXES:
-                found.update(f for f in p.rglob(f"*{suffix}") if f.name not in _NON_LOG_NAMES)
+                for f in p.rglob(f"*{suffix}"):
+                    if f.name not in _NON_LOG_NAMES:
+                        found.setdefault(f, False)
         elif p.is_file():
-            found.add(p)
+            found[p] = True  # explicit wins over found-by-scan
         else:
             raise FileNotFoundError(f"No such log file or directory: {p}")
-    return sorted(found)
+    return found
 
 
-def load_runs(paths: Iterable[str | Path]) -> list[Run]:
-    """Load every sample-epoch from the given logs as normalised runs."""
+def load_runs(paths: Iterable[str | Path], on_skip: SkipHandler | None = None) -> list[Run]:
+    """Load every sample-epoch from the given logs as normalised runs.
+
+    Files found by scanning a folder that turn out not to be Inspect logs are
+    skipped and passed to ``on_skip`` (default: a Python warning). A file
+    named explicitly that cannot be read raises ``NotAnInspectLog``.
+    """
     runs: list[Run] = []
-    for path in discover(paths):
-        runs.extend(read_log(path))
+    for path, explicit in sorted(_discover_with_origin(paths).items()):
+        try:
+            runs.extend(read_log(path))
+        except NotAnInspectLog as exc:
+            if explicit:
+                raise
+            (on_skip or _warn_skip)(exc)
     return runs
 
 
-def read_log(path: Path) -> Iterator[Run]:
+def _warn_skip(exc: NotAnInspectLog) -> None:
+    warnings.warn(f"skipped {exc}", stacklevel=3)
+
+
+def _read_inspect_log(path: Path) -> Any:
+    """Read one file with Inspect, translating any failure to NotAnInspectLog.
+
+    Only Inspect's own read is wrapped. Errors in evalsift's conversion code
+    after a successful read are bugs and must not be hidden as "skipped".
+    """
     # Imported lazily so `evalsift --help` and the pure-Python modules stay fast.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         from inspect_ai.log import read_eval_log
 
-        log = read_eval_log(str(path))
+        try:
+            log = read_eval_log(str(path))
+        except Exception as exc:  # Inspect raises ValueError, pydantic errors, OSError
+            first = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+            raise NotAnInspectLog(path, f"{type(exc).__name__}: {first}"[:200]) from exc
+    if getattr(log, "eval", None) is None:
+        raise NotAnInspectLog(path, "no eval header")
+    return log
+
+
+def read_log(path: Path) -> Iterator[Run]:
+    log = _read_inspect_log(path)
 
     task = str(getattr(log.eval, "task", "") or "")
     model = str(getattr(log.eval, "model", "") or "")

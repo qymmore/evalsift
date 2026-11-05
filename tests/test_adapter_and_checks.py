@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from evalsift.adapters import discover, load_runs
+from evalsift.adapters import NotAnInspectLog, discover, load_runs
 from evalsift.checks import REGISTRY, CheckConfig, invalid_run_ids, run_checks
 from evalsift.model import Finding, Run, Score, Severity, Turn
 
@@ -157,3 +157,85 @@ def test_score_binary_mapping() -> None:
         None,
         None,
     ]
+
+
+# ---------------------------------------------------------------- non-log files
+
+# Each is a way a file with a log extension can fail to be an Inspect log.
+JUNK = {
+    "config.json": '{"lr": 0.1, "seed": 3}',  # valid JSON, wrong shape
+    "empty.json": "{}",
+    "broken.json": "not json",
+    "zero.json": "",
+    "fake.eval": "hello",  # .eval must be a zip
+}
+
+
+def _junk_dir(tmp_path: Path, log_dir: Path) -> Path:
+    import shutil
+
+    shutil.copy(next(log_dir.glob("*.eval")), tmp_path / "real.eval")
+    (tmp_path / "nested").mkdir()
+    for name, body in JUNK.items():
+        (tmp_path / "nested" / name).write_text(body)
+    return tmp_path
+
+
+def test_junk_in_folder_is_skipped(tmp_path: Path, log_dir: Path) -> None:
+    folder = _junk_dir(tmp_path, log_dir)
+    skipped: list[NotAnInspectLog] = []
+    runs = load_runs([folder], on_skip=skipped.append)
+    assert len(runs) == 1  # the real log still loads
+    assert sorted(e.path.name for e in skipped) == sorted(JUNK)
+    assert all(e.reason for e in skipped)
+
+
+def test_default_skip_handler_warns(tmp_path: Path, log_dir: Path) -> None:
+    folder = _junk_dir(tmp_path, log_dir)
+    with pytest.warns(UserWarning, match="not a readable Inspect log") as record:
+        load_runs([folder])
+    assert len(record) == len(JUNK)
+
+
+@pytest.mark.parametrize("name", sorted(JUNK))
+def test_named_junk_file_is_an_error(name: str, tmp_path: Path) -> None:
+    path = tmp_path / name
+    path.write_text(JUNK[name])
+    with pytest.raises(NotAnInspectLog, match=name):
+        load_runs([path])
+
+
+def test_explicit_name_wins_over_folder_scan(tmp_path: Path, log_dir: Path) -> None:
+    folder = _junk_dir(tmp_path, log_dir)
+    with pytest.raises(NotAnInspectLog):
+        load_runs([folder, folder / "nested" / "config.json"], on_skip=lambda e: None)
+
+
+def test_conversion_bugs_are_not_swallowed(
+    tmp_path: Path, log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import evalsift.adapters.inspect as adapter
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("bug in evalsift")
+
+    monkeypatch.setattr(adapter, "_sample_to_run", broken)
+    with pytest.raises(RuntimeError, match="bug in evalsift"):
+        load_runs([_junk_dir(tmp_path, log_dir)], on_skip=lambda e: None)
+
+
+def test_cli_reports_skips(
+    tmp_path: Path, log_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from evalsift.cli import main
+
+    folder = _junk_dir(tmp_path, log_dir)
+    assert main(["check", str(folder), "--fail-on", "never"]) == 0
+    err = capsys.readouterr().err
+    assert err.count("evalsift: skipped") == len(JUNK)
+
+    assert main(["check", str(folder / "nested")]) == 2
+    assert f"{len(JUNK)} file(s) skipped" in capsys.readouterr().err
+
+    assert main(["check", str(folder / "nested" / "fake.eval")]) == 2
+    assert "not a readable Inspect log" in capsys.readouterr().err
